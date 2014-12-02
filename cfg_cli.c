@@ -60,6 +60,13 @@ static void print_cfg_types()
 	}
 }
 
+static void print_cfg_area_status(const struct config_area* ar)
+{
+	uart_send_str(cfg_area_status_names[ar->status]);
+	if (ar->invalid)
+		uart_send_str("/invalid");
+}
+
 static void print_cfg_info(const struct config* cfg)
 {
 	uart_send_str("[");
@@ -69,11 +76,11 @@ static void print_cfg_info(const struct config* cfg)
 	uart_send_str(" bytes used, active area #");
 	uart_print_i(cfg->active_area);
 	uart_send_str(" is ");
-	uart_send_str(cfg_area_status_names[cfg->area[cfg->active_area].status]);
+	print_cfg_area_status(&cfg->area[cfg->active_area]);
 	uart_send_str(", inactive area #");
 	uart_print_i(cfg->active_area^1);
 	uart_send_str(" is ");
-	uart_send_str(cfg_area_status_names[cfg->area[cfg->active_area^1].status]);
+	print_cfg_area_status(&cfg->area[cfg->active_area^1]);
 	uart_send_str("]\r");
 }
 

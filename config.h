@@ -13,15 +13,16 @@
 // since when we are erasing one the another one keeps
 // configuration content.
 
-#define CFG_BUFF_SEGS 1
+#define CFG_BUFF_SEGS 2
 #define CFG_BUFF_SIZE (FLASH_SEG_SZ*CFG_BUFF_SEGS)
 
 typedef enum {
 	area_empty,
+	area_dirty,
 	area_open,
+	area_modified,
 	area_closed,
-	area_completed,
-	area_invalid
+	area_completed
 } cfg_area_status_t;
 
 extern const char* cfg_area_status_names[];
@@ -31,7 +32,8 @@ struct config_area {
 	const char*       storage;
 	unsigned          used_bytes;
 	crc16_t           crc;
-	cfg_area_status_t status;
+	unsigned char     status;
+	unsigned char     invalid;	
 };
 
 // The config instance has 2 buffer areas and keeps index of the active one

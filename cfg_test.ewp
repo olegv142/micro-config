@@ -1898,6 +1898,9 @@
     <name>$PROJ_DIR$\cfg_test.c</name>
   </file>
   <file>
+    <name>$PROJ_DIR$\cfg_types.c</name>
+  </file>
+  <file>
     <name>$PROJ_DIR$\cli.c</name>
   </file>
   <file>

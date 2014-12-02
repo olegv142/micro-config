@@ -26,6 +26,8 @@ struct cfg_type {
 #define CFG_STR_I(n, d)  {.name=n, .nind=1, .str=1, .def.ptr=d}
 #define CFG_TYPE_END     {.name=0}
 
+#define CFG_NTYPES (sizeof(g_cfg_types)/sizeof(g_cfg_types[0])-1)
+
 #define MAX_CFG_TYPES 255
 
 // Global types registry

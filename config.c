@@ -5,18 +5,12 @@
 
 const char* cfg_area_status_names[] = {
 	"empty",
+	"dirty",
 	"open",
+	"modified",
 	"closed",
-	"completed",
-	"invalid"
+	"completed"
 };
-
-// Never use all ones value. So we can detect the situation when the
-// object was partially written.
-static inline crc16_t cfg_crc_patch(crc16_t crc)
-{
-	return ~crc ? crc : 0;
-}
 
 static inline unsigned char cfg_type2tag(struct cfg_type const* t)
 {
@@ -97,6 +91,7 @@ static void cfg_erase_area(struct config* cfg, signed char a)
 	ar->used_bytes = 0;
 	ar->crc = CRC16_INIT;
 	ar->status = area_empty;
+	ar->invalid = 0;
 }
 
 static inline void cfg_erase_all(struct config* cfg)
@@ -142,41 +137,51 @@ static void cfg_chk_area(struct config* cfg, signed char a)
 			goto invalid;
 		f = (struct cfg_obj_footer const*)ptr_ - 1;
 		ar->crc = crc16_up_buff(ar->crc, ptr, sz - sizeof(*f));
-		if (f->crc != cfg_crc_patch(ar->crc))
+		if (f->crc != ar->crc)
 			goto invalid;
 		if (!t) {
 			switch (h->ij) {
 			case area_open:
-				if (ar->status != area_empty)
-					goto invalid;
+				if (ar->status != area_empty && ar->status != area_dirty)
+					goto invalid_status;
 				ar->status = area_open;
 				break;
 			case area_closed:
-				if (ar->status != area_open)
-					goto invalid;
+				if (ar->status != area_open && ar->status != area_modified)
+					goto invalid_status;
 				ar->status = area_closed;
 				break;
 			case area_completed:
-				if (ar->status != area_closed)
-					goto invalid;
+				if (ar->status != area_closed && ar->status != area_empty)
+					goto invalid_status;
 				ar->status = area_completed;
 				break;
 			default:
-				goto invalid;
+				goto invalid_status;
 			}
 		} else {
-			if (ar->status > area_open)
-				goto invalid;
+			if (ar->status > area_modified)
+				goto invalid_status;
+			switch (ar->status) {
+			case area_empty:
+				ar->status = area_dirty;
+				break;
+			case area_open:
+				ar->status = area_modified;
+				break;
+			}
 		}
 		continue;
+invalid_status:
+		DBG_BUG();
 invalid:
-		ar->status = area_invalid;
+		ar->invalid = 1;
 		break;
 	}
 	ar->used_bytes = ptr - ar->storage;
 	BUG_ON(ar->used_bytes > CFG_BUFF_SIZE);
-	if (ar->status != area_invalid && !cfg_is_area_clean(cfg, a))
-		ar->status = area_invalid;
+	if (!ar->invalid && !cfg_is_area_clean(cfg, a))
+		ar->invalid = 1;
 }
 
 static int cfg_has_instance(struct config* cfg, struct cfg_obj_header const* h, unsigned range)
@@ -254,6 +259,8 @@ static unsigned cfg_write(
 	unsigned val_sz  = cfg_obj_data_size_(t, j);
 	unsigned sz = sizeof(struct cfg_obj_header) + val_sz + sizeof(struct cfg_obj_footer);
 	struct config_area* ar = &cfg->area[a];
+
+	BUG_ON(ar->invalid);
 	BUG_ON(ar->used_bytes > CFG_BUFF_SIZE);
 	if (ar->used_bytes + sz > (t ? CFG_BUFF_SIZE-CFG_RESERVED_SPACE : CFG_BUFF_SIZE))
 		return 0;
@@ -272,8 +279,9 @@ static unsigned cfg_write(
 		ptr += val_sz;
 		if (val_sz_ & 1)
 			ar->crc = crc16_up(ar->crc, 0xff);
+		ar->status = ar->status < area_open ? area_dirty : area_modified;
 	}
-	f.crc = cfg_crc_patch(ar->crc);
+	f.crc = ar->crc;
 	flash_write((unsigned*)ptr, (unsigned const*)&f, sizeof(f));	
 	ar->used_bytes += sz;
 	return sz;
@@ -282,7 +290,7 @@ static unsigned cfg_write(
 static void cfg_commit_status(struct config* cfg, int a, cfg_area_status_t st)
 {
 	unsigned res;
-	if (cfg->area[a].status >= st)
+	if (cfg->area[a].invalid || cfg->area[a].status >= st)
 		return;
 	res = cfg_write(cfg, a, 0, 0, st, 0);
 	BUG_ON(!res);
@@ -303,14 +311,12 @@ static void cfg_chkpt(struct config* cfg)
 {
 	BUG_ON(cfg->active_area < 0);
 	int old_a = cfg->active_area, new_a = old_a ^ 1;
-	BUG_ON(cfg->area[old_a].status == area_empty);
-	BUG_ON(!cfg->area[old_a].used_bytes);
+	BUG_ON(cfg->area[old_a].status < area_open);
 	cfg_commit_status(cfg, old_a, area_closed);
 	cfg_erase_area(cfg, new_a);
 	cfg_enum(cfg, cfg_chkpt_cb);
 	cfg_commit_status(cfg, new_a, area_open);
 	cfg_commit_status(cfg, old_a, area_completed);
-	BUG_ON(!cfg->area[new_a].used_bytes);
 	cfg->active_area = new_a;
 }
 
@@ -335,15 +341,15 @@ static unsigned cfg_put(
 
 static inline int cfg_select_active_area(struct config* cfg)
 {
-	// empty area
-	if (cfg->area[1].status == area_empty)
+	// area has no usable data
+	if (cfg->area[1].status < area_open)
 		return 0;
-	if (cfg->area[0].status == area_empty)
+	if (cfg->area[0].status < area_open)
 		return 1;
 	// area successfully open
-	if (cfg->area[0].status == area_open)
+	if (cfg->area[0].status < area_closed)
 		return 0;
-	if (cfg->area[1].status == area_open)
+	if (cfg->area[1].status < area_closed)
 		return 1;
 	// in the middle of checkpoint
 	if (cfg->area[0].status == area_closed)
@@ -355,8 +361,7 @@ static inline int cfg_select_active_area(struct config* cfg)
 		return 0;
 	if (cfg->area[0].status == area_completed)
 		return 1;
-	DBG_BUG();
-	// both failed !!!
+	BUG(); // Should never hit
 	return -1;
 }
 
@@ -366,29 +371,26 @@ void cfg_init(struct config* cfg)
 	cfg_chk_area(cfg, 1);
 	// Choose active area
 	cfg->active_area = cfg_select_active_area(cfg);
-	if (cfg->active_area < 0) {
+	if (cfg->active_area < 0 || cfg->area[cfg->active_area].status < area_open) {
+		// Prepare active area if necessary
 		cfg_erase_all(cfg);
-		return;
+		cfg_commit_status(cfg, cfg->active_area,   area_open);
+		cfg_commit_status(cfg, cfg->active_area^1, area_completed);
 	}
-	// Cure active area
-	switch (cfg->area[cfg->active_area].status) {
-	case area_invalid:
-		if (cfg->area[cfg->active_area].used_bytes)
-			cfg_chkpt(cfg);
-		else
-			cfg_erase_area(cfg, cfg->active_area);
-		break;
-	case area_completed: DBG_BUG();
-	case area_closed:
+	else if (
+		cfg->area[cfg->active_area].status != area_open ||
+		cfg->area[cfg->active_area^1].status != area_completed ||
+		cfg->area[cfg->active_area].invalid
+		
+	) {
+		// Stabilize storage
 		cfg_chkpt(cfg);
-		break;
 	}
-	// Open active area if necessary
-	if (cfg->area[cfg->active_area].status == area_empty)
-		cfg_commit_status(cfg, cfg->active_area, area_open);
 	// Erase failed inactive area
-	if (cfg->area[cfg->active_area^1].status == area_invalid)
+	if (cfg->area[cfg->active_area^1].invalid)
 		cfg_erase_area(cfg, cfg->active_area^1);
+	// We should never start from invalid active area
+	BUG_ON(cfg->area[cfg->active_area].invalid);
 }
 
 // Lookup value in storage
